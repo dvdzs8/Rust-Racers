@@ -1,6 +1,7 @@
-use bevy::prelude::*;
 use crate::GameState;
-use crate::title_screen::{LobbyListContainer, LobbyRow, JoinButton};
+use crate::networking::MapChoice;
+use crate::title_screen::{JoinButton, LobbyListContainer, LobbyRow};
+use bevy::prelude::*;
 
 #[derive(Component)]
 pub struct LobbyScreenEntity;
@@ -18,10 +19,24 @@ pub struct PlayerNameText {
 #[derive(Component)]
 pub struct LobbyCodeText;
 
-#[derive(Resource, Default)]
+#[derive(Component)]
+pub struct LobbyMapLabel;
+
+#[derive(Resource)]
 pub struct LobbyState {
     pub connected_players: Vec<String>,
     pub name: String,
+    pub map: MapChoice,
+}
+
+impl Default for LobbyState {
+    fn default() -> Self {
+        Self {
+            connected_players: Vec::new(),
+            name: String::new(),
+            map: MapChoice::Small,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -29,6 +44,7 @@ pub struct LobbyInfo {
     pub name: String,
     pub players: usize,
     pub capacity: usize,
+    pub map: MapChoice,
 }
 
 #[derive(Resource, Default)]
@@ -41,7 +57,7 @@ pub fn setup_lobby(
     mut commands: &mut Commands,
     asset_server: AssetServer,
     lobby_state: &LobbyState,
-){
+) {
     commands.spawn((
         Text2d::new("Lobby"),
         TextColor(Color::BLACK),
@@ -70,12 +86,26 @@ pub fn setup_lobby(
         LobbyCodeText,
     ));
     commands.spawn((
+        Text2d::new(format!("Map: {}", lobby_state.map.label())),
+        TextColor(Color::BLACK),
+        Transform {
+            translation: Vec3::new(450., 240., 1.),
+            ..default()
+        },
+        TextFont {
+            font_size: 28.0,
+            ..default()
+        },
+        LobbyScreenEntity,
+        LobbyMapLabel,
+    ));
+    commands.spawn((
         Sprite::from_image(asset_server.load("title_screen/backArrow.png")),
         Transform {
             translation: Vec3::new(-570., 300., 1.),
             ..default()
         },
-        LobbyScreenEntity
+        LobbyScreenEntity,
     ));
     commands.spawn((
         Sprite::from_image(asset_server.load("title_screen/keys/keyEsc.png")),
@@ -83,7 +113,7 @@ pub fn setup_lobby(
             translation: Vec3::new(-570., 220., 1.),
             ..default()
         },
-        LobbyScreenEntity
+        LobbyScreenEntity,
     ));
     commands.spawn((
         Sprite::from_image(asset_server.load("title_screen/slantedButton.png")),
@@ -91,7 +121,7 @@ pub fn setup_lobby(
             translation: Vec3::new(0., -300., 1.),
             ..default()
         },
-        LobbyScreenEntity
+        LobbyScreenEntity,
     ));
     commands.spawn((
         Text2d::new("GO!"),
@@ -112,7 +142,7 @@ pub fn setup_lobby(
             translation: Vec3::new(-250., -300., 1.),
             ..default()
         },
-        LobbyScreenEntity
+        LobbyScreenEntity,
     ));
 
     // Spawn player slots dynamically based on connected players
@@ -172,7 +202,14 @@ pub fn update_lobby_display(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
     lobby_state: Res<LobbyState>,
-    mut name_text_query: Query<(&mut Text2d, &PlayerNameText)>,
+    mut name_text_query: Query<(&mut Text2d, &PlayerNameText), Without<LobbyMapLabel>>,
+    mut map_label_query: Query<
+        &mut Text2d,
+        (
+            With<LobbyMapLabel>,
+            Without<PlayerNameText>,
+        ),
+    >,
     slot_query: Query<(Entity, &PlayerSlot), With<LobbyScreenEntity>>,
 ) {
     // Only run when LobbyState changes
@@ -189,13 +226,25 @@ pub fn update_lobby_display(
 
     // Update existing player name texts
     for (mut text, player_name_text) in name_text_query.iter_mut() {
-        if let Some(player_name) = lobby_state.connected_players.get(player_name_text.slot_index) {
+        if let Some(player_name) = lobby_state
+            .connected_players
+            .get(player_name_text.slot_index)
+        {
             text.0 = player_name.clone();
         }
     }
 
+    if let Ok(mut text) = map_label_query.get_single_mut() {
+        text.0 = format!("Map: {}", lobby_state.map.label());
+    }
+
     // Count how many slots currently exist
-    let existing_slots = slot_query.iter().map(|(_, slot)| slot.slot_index).max().map(|i| i + 1).unwrap_or(0);
+    let existing_slots = slot_query
+        .iter()
+        .map(|(_, slot)| slot.slot_index)
+        .max()
+        .map(|i| i + 1)
+        .unwrap_or(0);
     let needed_slots = lobby_state.connected_players.len();
 
     // Spawn new slots if need more
@@ -253,8 +302,8 @@ pub fn populate_lobby_list(
     container_q: Query<Entity, With<LobbyListContainer>>,
     row_q: Query<Entity, With<LobbyRow>>,
 ) {
-    if !dirty.0 { 
-        return; 
+    if !dirty.0 {
+        return;
     }
     dirty.0 = false;
 
@@ -263,13 +312,14 @@ pub fn populate_lobby_list(
         commands.entity(e).despawn_recursive();
     }
 
-    let Ok(container) = container_q.get_single() else { 
-        return; 
+    let Ok(container) = container_q.get_single() else {
+        return;
     };
 
     for lobby in &list.0 {
         let name = lobby.name.clone();
         let players_label = format!("{} / {}", lobby.players, lobby.capacity);
+        let map_label = format!("Map: {}", lobby.map.label());
 
         commands.entity(container).with_children(|rows| {
             rows.spawn((
@@ -290,14 +340,30 @@ pub fn populate_lobby_list(
                 // Lobby name
                 row.spawn((
                     Text::new(name.clone()),
-                    TextFont { font_size: 24.0, ..default() },
+                    TextFont {
+                        font_size: 24.0,
+                        ..default()
+                    },
                     TextColor(Color::BLACK),
                 ));
 
                 // Player count
                 row.spawn((
                     Text::new(players_label),
-                    TextFont { font_size: 22.0, ..default() },
+                    TextFont {
+                        font_size: 22.0,
+                        ..default()
+                    },
+                    TextColor(Color::BLACK),
+                ));
+
+                // Map label
+                row.spawn((
+                    Text::new(map_label.clone()),
+                    TextFont {
+                        font_size: 20.0,
+                        ..default()
+                    },
                     TextColor(Color::BLACK),
                 ));
 
@@ -310,12 +376,18 @@ pub fn populate_lobby_list(
                     },
                     BackgroundColor(Color::srgb_u8(230, 240, 255)),
                     BorderRadius::all(Val::Px(8.0)),
-                    JoinButton { lobby_name: name.clone() },
+                    JoinButton {
+                        lobby_name: name.clone(),
+                        map: lobby.map,
+                    },
                 ))
                 .with_children(|b| {
                     b.spawn((
                         Text::new("Join"),
-                        TextFont { font_size: 22.0, ..default() },
+                        TextFont {
+                            font_size: 22.0,
+                            ..default()
+                        },
                         TextColor(Color::srgb_u8(10, 60, 140)),
                     ));
                 });

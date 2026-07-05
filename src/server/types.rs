@@ -1,9 +1,37 @@
 use bevy::prelude::*;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
+use crate::game_logic::{GameMap, TILE_SIZE};
+use crate::game_logic::theta_grid::ThetaGrid;
+use crate::networking::MapChoice;
+
+// Single input with sequence number (shared with client)
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InputData {
+    pub sequence: u64,
+    pub forward: bool,
+    pub backward: bool,
+    pub left: bool,
+    pub right: bool,
+    pub drift: bool,
+    pub easy_drift: bool,
+    #[serde(default)]
+    pub boost: bool,
+}
+
+// Single position snapshot with sequence number
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct PositionSnapshot {
+    pub sequence: u64,
+    pub x: f32,
+    pub y: f32,
+    pub vx: f32,
+    pub vy: f32,
+    pub angle: f32,
+}
 
 // Server doesn't use GameState but lap_system needs it
 #[derive(States, Debug, Clone, PartialEq, Eq, Hash, Default)]
@@ -25,17 +53,32 @@ pub enum GameState {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
 pub enum MessageType {
-    CreateLobby { name: String },
-    JoinLobby { name: String },
-    LeaveLobby { name: String },
+    CreateLobby {
+        name: String,
+        map: MapChoice,
+    },
+    JoinLobby {
+        name: String,
+    },
+    LeaveLobby {
+        name: String,
+    },
     ListLobbies,
-    StartLobby { name: String },
+    StartLobby {
+        name: String,
+    },
     PlayerInput {
+        sequence: u64,
         forward: bool,
         backward: bool,
         left: bool,
         right: bool,
         drift: bool,
+        easy_drift: bool,
+        boost: bool,
+    },
+    PlayerInputBuffer {
+        inputs: Vec<InputData>,
     },
     Ping,
 }
@@ -70,6 +113,8 @@ pub struct PlayerInput {
     pub left: bool,
     pub right: bool,
     pub drift: bool,
+    pub easy_drift: bool,
+    pub boost: bool,
 }
 
 impl Default for PlayerInput {
@@ -80,6 +125,8 @@ impl Default for PlayerInput {
             left: false,
             right: false,
             drift: false,
+            easy_drift: false,
+            boost: false,
         }
     }
 }
@@ -92,7 +139,11 @@ pub struct PlayerState {
     pub velocity: bevy::math::Vec2,
     pub angle: f32,
     pub inputs: PlayerInput,
-    pub input_count: u64,
+    pub last_processed_sequence: u64,
+    pub boost_remaining: f32,
+    pub was_drifting: bool,
+    // Queue of pending inputs to process
+    pub input_queue: Vec<InputData>,
 }
 
 // Lobby structure
@@ -103,16 +154,24 @@ pub struct Lobby {
     pub name: String,
     pub started: bool,
     pub states: Arc<Mutex<HashMap<u32, PlayerState>>>,
+    pub map_choice: MapChoice,
+    pub map: GameMap,
+    pub theta_grid: ThetaGrid,
 }
 
 impl Default for Lobby {
     fn default() -> Self {
+        let map = GameMap::default();
+        let theta_grid = ThetaGrid::create_theta_grid_with_size(&map, TILE_SIZE as f32, 100, 100);
         Self {
             players: Arc::new(Mutex::new(Vec::new())),
             host: 0,
             name: String::from(""),
             started: false,
             states: Arc::new(Mutex::new(HashMap::new())),
+            map_choice: MapChoice::Small,
+            map,
+            theta_grid,
         }
     }
 }
@@ -143,7 +202,9 @@ pub struct PlayerInputComponent {
     pub left: bool,
     pub right: bool,
     pub drift: bool,
-    pub input_count: u64,
+    pub easy_drift: bool,
+    pub boost: bool,
+    pub last_processed_sequence: u64,
 }
 
 impl Default for PlayerInputComponent {
@@ -154,7 +215,9 @@ impl Default for PlayerInputComponent {
             left: false,
             right: false,
             drift: false,
-            input_count: 0,
+            easy_drift: false,
+            boost: false,
+            last_processed_sequence: 0,
         }
     }
 }
@@ -179,6 +242,13 @@ pub enum ServerCommand {
         lobby_name: String,
         x: f32,
         y: f32,
+    },
+    SpawnAI {
+        ai_id: u32,
+        lobby_name: String,
+        x: f32,
+        y: f32,
+        angle: f32,
     },
     DespawnPlayer {
         player_id: u32,

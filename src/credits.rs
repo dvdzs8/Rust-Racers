@@ -1,5 +1,5 @@
-use bevy::prelude::*;
 use crate::GameState;
+use bevy::prelude::*;
 
 // Credits-related components and resources
 #[derive(Component, Deref, DerefMut)]
@@ -14,17 +14,15 @@ pub fn check_for_credits_input(
     mut next_state: ResMut<NextState<GameState>>,
     current_state: Res<State<GameState>>,
 ) {
-    if input.just_pressed(KeyCode::KeyP) && *current_state == GameState::Playing {
+    if input.just_pressed(KeyCode::KeyP)
+        && (*current_state == GameState::Playing || *current_state == GameState::PlayingDemo)
+    {
         next_state.set(GameState::Credits);
     }
 }
 
 // Setup the credits screen
-pub fn setup_credits(
-    mut commands: Commands, 
-    asset_server: Res<AssetServer>,
-) {
-
+pub fn setup_credits(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands.spawn((
         Sprite::from_image(asset_server.load("credits/rust-racers.png")),
         Transform {
@@ -119,11 +117,11 @@ pub fn setup_credits(
 
 // Show credits animation
 pub fn show_credits(
-    time: Res<Time>, 
+    time: Res<Time>,
     mut popup: Query<(&mut PopupTimer, &mut Transform), With<CreditsEntity>>,
 ) {
     let mut counter = 100.;
-    
+
     for (mut timer, mut transform) in popup.iter_mut() {
         timer.tick(time.delta());
         if timer.just_finished() {

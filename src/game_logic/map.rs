@@ -1,20 +1,19 @@
-use std::fs::File;
-use std::io::{BufReader, BufRead};
+use crate::game_logic::{DIRT, GRASS, OIL, ROAD, SAND, TILES, TerrainTile, ThetaCheckpoint, ThetaCheckpointList, WALL, WET, AIControlled};
 use bevy::prelude::*;
-use crate::game_logic::{TerrainTile, TILES, ROAD, WET, DIRT, GRASS, SAND, OIL, WALL, ThetaCheckpoint, ThetaCheckpointList};
+use std::fs::File;
+use std::io::{BufRead, BufReader};
 
-#[derive(Resource)]
+#[derive(Resource, Clone)]
 pub struct GameMap {
     pub height: f32,
     pub width: f32,
 
     // logical terrain for physics
     pub terrain_layer: Vec<Vec<TerrainTile>>,
-    
+
     // visual only layers
     pub visual_layers: Vec<Vec<Vec<u8>>>, // Vec<Layer<Rows<Tiles>>>
 }
-
 
 //I gave it an argument called "filename" in order to make it WAY easier for us to do multiple maps if we want
 pub fn load_map_from_file(filename: &str) -> GameMap {
@@ -94,13 +93,12 @@ pub fn load_map_from_file(filename: &str) -> GameMap {
             .filter(|s| !s.is_empty()) // filter to handle potential extra spaces
             .map(|s| u8::from_str_radix(s, 16).unwrap()) // changing this to interpet HEX
             .collect();
-        
+
         // avoid adding empty rows if the line was blank
         if !row.is_empty() {
             current_layer.push(row);
         }
     }
-
 
     GameMap {
         width,
@@ -110,21 +108,17 @@ pub fn load_map_from_file(filename: &str) -> GameMap {
     }
 }
 
-
-
-/*  
+/*
     rendering the map from the GameMap and tile atlas
-*/ 
+*/
 pub fn spawn_map(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
     mut atlases: ResMut<Assets<TextureAtlasLayout>>,
     game_map: Res<GameMap>,
-) { 
+) {
     // using nearest neighbor filtering so that there isn't weird gaps between tiles
-    let texture_handle = asset_server.load(
-        "aseprite-tiles/tiles.png"
-    );
+    let texture_handle = asset_server.load("aseprite-tiles/tiles.png");
 
     // create the atlas based on the dimension of tiles.png
     let layout = TextureAtlasLayout::from_grid(UVec2::new(64, 64), 16, 16, None, None);
@@ -135,7 +129,9 @@ pub fn spawn_map(
     // rendering the terrain (logical) layer first
     for (y, row) in game_map.terrain_layer.iter().enumerate() {
         for (x, tile_id) in row.iter().enumerate() {
-            if tile_id.tile_id == 255 { continue; }
+            if tile_id.tile_id == 255 {
+                continue;
+            }
             commands.spawn((
                 Sprite::from_atlas_image(
                     texture_handle.clone(),
@@ -157,7 +153,9 @@ pub fn spawn_map(
     for (layer_index, layer) in game_map.visual_layers.iter().enumerate() {
         for (y, row) in layer.iter().enumerate() {
             for (x, tile_id) in row.iter().enumerate() {
-                if *tile_id == 255 { continue; } // assume 255 is empty.
+                if *tile_id == 255 {
+                    continue;
+                } // assume 255 is empty.
                 commands.spawn((
                     Sprite::from_atlas_image(
                         texture_handle.clone(),
@@ -180,7 +178,8 @@ pub fn spawn_map(
 
 impl GameMap {
     // get tile from a world position
-    pub fn get_tile(&self, world_x: f32, world_y: f32, tile_size: f32) -> &TerrainTile { // Or whatever your Tile struct is
+    pub fn get_tile(&self, world_x: f32, world_y: f32, tile_size: f32) -> &TerrainTile {
+        // Or whatever your Tile struct is
         // translate from world origin (center) to map origin (top-left)
         // this shifts the coordinates so that (0,0) is the top-left of the map.
         let map_x = world_x + self.width / 2.0;
@@ -203,5 +202,98 @@ impl GameMap {
 
         // return t ile
         &self.terrain_layer[tile_y][tile_x]
+    }
+
+    // Based on Wikipedia pseudocode https://en.wikipedia.org/wiki/Theta*
+    pub fn line_of_sight(&self, point1: (f32, f32), point2: (f32, f32)) -> bool {
+        let mut x0 = point1.0 as usize;
+        let mut y0 = point1.1 as usize;
+        let x1 = point2.0 as usize;
+        let y1 = point2.1 as usize;
+
+        let dx = (x1 as i32 - x0 as i32).abs();
+        let dy = (y1 as i32 - y0 as i32).abs();
+        let sx = if x0 < x1 { 1i32 } else { -1i32 };
+        let sy = if y0 < y1 { 1i32 } else { -1i32 };
+        let mut err = dx - dy;
+
+        loop {
+            // Check current tile
+            let tile = &self.terrain_layer[y0][x0];
+
+            // If we found a wall, no LOS
+            if !tile.passable {
+                return false;
+            }
+
+            if x0 == x1 && y0 == y1 {
+                break;
+            }
+
+            let e2 = 2 * err;
+            if e2 > -dy {
+                err -= dy;
+                x0 = (x0 as i32 + sx) as usize;
+            }
+            if e2 < dx {
+                err += dx;
+                y0 = (y0 as i32 + sy) as usize;
+            }
+        }
+
+        true
+    }
+
+    // For debug
+    pub fn tile_to_world(&self, tile_x: f32, tile_y: f32, tile_size: f32) -> Vec2 {
+        let world_x = tile_x * tile_size - self.width / 2.0 + tile_size / 2.0;
+        let world_y = -(tile_y * tile_size) + self.height / 2.0 - tile_size / 2.0;
+        Vec2::new(world_x, world_y)
+    }
+}
+
+impl Default for GameMap {
+    fn default() -> Self {
+        load_map_from_file("assets/big-map.txt")
+    }
+}
+
+pub fn draw_checkpoint_lines(
+    mut gizmos: Gizmos,
+    game_map: Res<GameMap>,
+    // You'll need to pass in your checkpoint list somehow - adjust this based on your setup
+    // For example, if it's on an AI car component:
+    checkpoints_query: Query<&ThetaCheckpointList, With<AIControlled>>,
+) {
+    let tile_size = 64.0;
+
+    // Draw checkpoints for each AI car (or just draw once if you have a global list)
+    for checkpoint_list in checkpoints_query.iter() {
+        for (i, checkpoint) in checkpoint_list.checkpoints.iter().enumerate() {
+            let world_pos1 = game_map.tile_to_world(
+                checkpoint.point1.0,
+                checkpoint.point1.1,
+                tile_size
+            );
+            let world_pos2 = game_map.tile_to_world(
+                checkpoint.point2.0,
+                checkpoint.point2.1,
+                tile_size
+            );
+
+            // Alternate colors for each checkpoint to make them easier to distinguish
+            let color = if i % 2 == 0 {
+                Color::srgb(0.0, 1.0, 1.0) // Cyan
+            } else {
+                Color::srgb(1.0, 0.5, 0.0) // Orange
+            };
+
+            // Draw the checkpoint line
+            gizmos.line_2d(world_pos1, world_pos2, color);
+
+            // Draw small circles at the endpoints
+            gizmos.circle_2d(world_pos1, 4.0, color);
+            gizmos.circle_2d(world_pos2, 4.0, color);
+        }
     }
 }
